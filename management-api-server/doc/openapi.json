@@ -118,6 +118,99 @@
         }
       }
     },
+    "/api/v0/ops/executor/job" : {
+      "get" : {
+        "summary" : "Returns the JobDetails",
+        "operationId" : "getJobStatus",
+        "parameters": [{
+          "name": "job_id",
+          "in": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }],
+        "responses" : {
+          "default" : {
+            "description" : "details of Job matching job_id",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Job"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/keyspace" : {
+      "get" : {
+        "summary" : "List the keyspaces existing in the cluster",
+        "operationId" : "listKeyspaces",
+        "parameters" : [ {
+          "name" : "keyspaceName",
+          "in" : "query",
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "application/json" : { }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/keyspace/replication" : {
+      "get" : {
+        "summary" : "Get the replication settings of an existing keyspace",
+        "operationId" : "replication",
+        "parameters" : [ {
+          "name" : "keyspaceName",
+          "required": true,
+          "in" : "query",
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "application/json" : {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "examples": {
+                  "NetworkTopologyStrategy": {
+                    "value": {
+                      "class": "org.apache.cassandra.locator.NetworkTopologyStrategy",
+                      "dc1": "3",
+                      "dc2": "1"
+                    },
+                    "summary": "Example for a keyspace with NetworkTopologyStrategy"
+                  },
+                  "SimpleStrategy": {
+                    "value": {
+                      "class": "org.apache.cassandra.locator.SimpleStrategy",
+                      "replication_factor": "3"
+                    },
+                    "summary": "Example for a keyspace with SimpleStrategy"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v0/ops/keyspace/refresh" : {
       "post" : {
         "summary" : "Load newly placed SSTables to the system without restart",
@@ -148,7 +241,7 @@
     "/api/v0/ops/keyspace/alter" : {
       "post" : {
         "summary" : "Alter the replication settings of an existing keyspace",
-        "operationId" : "alter",
+        "operationId" : "alterKeyspace",
         "requestBody" : {
           "content" : {
             "application/json" : {
@@ -171,7 +264,7 @@
     "/api/v0/ops/keyspace/create" : {
       "post" : {
         "summary" : "Create a new keyspace with the given name and replication settings",
-        "operationId" : "create",
+        "operationId" : "createKeyspace",
         "requestBody" : {
           "content" : {
             "application/json" : {
@@ -193,7 +286,7 @@
     },
     "/api/v0/ops/keyspace/cleanup" : {
       "post" : {
-        "summary" : "Triggers the immediate cleanup of keys no longer belonging to a node. By default, clean all keyspaces",
+        "summary" : "Triggers the immediate cleanup of keys no longer belonging to a node. By default, clean all keyspaces. This operation is asynchronous and returns immediately",
         "operationId" : "cleanup",
         "requestBody" : {
           "content" : {
@@ -313,6 +406,24 @@
         }
       }
     },
+    "/api/v0/metadata/versions/features" : {
+      "get" : {
+        "summary" : "Returns the management-api featureSet",
+        "operationId" : "getFeatureSet",
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/FeatureSet"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v0/metadata/endpoints" : {
       "get" : {
         "summary" : "Returns this nodes view of the endpoint states of nodes",
@@ -345,6 +456,39 @@
       "post" : {
         "summary" : "Drain the node (stop accepting writes and flush all tables)",
         "operationId" : "drain",
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "text/plain" : { }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/node/fullquerylogging" : {
+      "post" : {
+        "summary" : "Enable or disable full query logging facility.",
+        "operationId" : "setFullQuerylog",
+        "parameters" : [ {
+          "name" : "enabled",
+          "in" : "query",
+          "schema" : {
+            "type" : "boolean"
+          }
+        } ],
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "text/plain" : { }
+            }
+          }
+        }
+      },
+      "get" : {
+        "summary" : "Get whether full query logging is enabled.",
+        "operationId" : "isFullQueryLogEnabled",
         "responses" : {
           "default" : {
             "description" : "default response",
@@ -580,6 +724,99 @@
             "application/json" : {
               "schema" : {
                 "$ref" : "#/components/schemas/TakeSnapshotRequest"
+              }
+            }
+          }
+        },
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "text/plain" : { }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/node/repair" : {
+      "post" : {
+        "summary" : "Execute a nodetool repair operation",
+        "operationId" : "repair",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/RepairRequest"
+              }
+            }
+          }
+        },
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "text/plain" : { }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/tables" : {
+      "get" : {
+        "summary" : "List the tables in a keyspace",
+        "operationId" : "listTables",
+        "parameters" : [ {
+          "name" : "keyspaceName",
+          "required": true,
+          "in" : "query",
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "default" : {
+            "description" : "default response",
+            "content" : {
+              "application/json" : {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "example": [ "table1", "table2" ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v0/ops/tables/create" : {
+      "post" : {
+        "summary" : "Create a new table in an existing keyspace",
+        "operationId" : "createTable",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CreateTableRequest"
+              },
+              "example": {
+                "keyspace_name" : "ks1",
+                "table_name" : "table1",
+                "columns" : [
+                  { "name" : "pk1", "type": "int", "kind" : "PARTITION_KEY", "position" : 0 },
+                  { "name" : "pk2", "type": "int", "kind" : "PARTITION_KEY", "position" : 1 },
+                  { "name" : "cc1", "type": "timeuuid", "kind" : "CLUSTERING", "position" : 0, "order" : "DESC" },
+                  { "name" : "cc2", "type": "text", "kind" : "CLUSTERING", "position" : 1, "order" : "ASC" },
+                  { "name" : "v1", "type": "timestamp", "kind" : "REGULAR" },
+                  { "name" : "v2", "type": "list<text>", "kind" : "REGULAR" },
+                  { "name" : "s", "type": "boolean", "kind" : "STATIC" }
+                ],
+                "options": {
+                  "bloom_filter_fp_chance": "0.01",
+                  "caching" : { "keys": "ALL", "rows_per_partition" : "NONE" }
+                }
               }
             }
           }
@@ -861,6 +1098,160 @@
             "items" : {
               "type" : "string"
             }
+          }
+        }
+      },
+      "RepairRequest" : {
+        "required" : [ "keyspace_name" ],
+        "type" : "object",
+        "properties" : {
+          "keyspace_name" : {
+            "type" : "string"
+          },
+          "tables" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "full" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "CreateTableRequest": {
+        "type": "object",
+        "required": [
+          "keyspace_name",
+          "table_name",
+          "columns"
+        ],
+        "properties": {
+          "keyspace_name": {
+            "type": "string",
+            "description": "The name of the keyspace where the table is to be created. The keyspace must exist."
+          },
+          "table_name": {
+            "type": "string",
+            "description": "The name of the table to create."
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "type",
+                "kind"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The name of the column."
+                },
+                "type": {
+                  "type": "string",
+                  "description": "The type of the column. Must be a valid CQL type, e.g. text, int or list<timmeuid>."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The kind of the column. Must be one of: PARTITION_KEY, CLUSTERING_COLUMN, REGULAR, STATIC.",
+                  "enum": [
+                    "PARTITION_KEY",
+                    "CLUSTERING_COLUMN",
+                    "REGULAR",
+                    "STATIC"
+                  ]
+                },
+                "position": {
+                  "type": "integer",
+                  "description": "The zero-based index of the column in the partition key or clustering column group. Only required for the PARTITION_KEY and CLUSTERING_COLUMN kinds, ignored otherwise. Must be equal to or greater than zero.",
+                  "minimum": 0
+                },
+                "order": {
+                  "type": "string",
+                  "description": "The clustering order of the column. Only required for the CLUSTERING_COLUMN kind, ignored otherwise. Must be one of: ASC, DESC.",
+                  "enum": [
+                    "ASC",
+                    "DESC"
+                  ]
+                }
+              }
+            }
+          },
+          "options": {
+            "description": "The table options. Each option value must be either a string or a dictionary of strings.",
+            "oneOf": [
+              {
+                "type": "object",
+                "example": {
+                  "bloom_filter_fp_chance": "0.01"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "object",
+                "example": {
+                  "caching": {
+                    "keys": "ALL",
+                    "rows_per_partition": "NONE"
+                  }
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "FeatureSet": {
+        "type": "object",
+        "properties": {
+          "cassandra_version": {
+            "type": "string"
+          },
+          "mgmt_version": {
+            "type": "string"
+          },
+          "features" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "WAITING",
+              "COMPLETED",
+              "ERROR"
+            ]
+          },
+          "submit_time": {
+            "type": "string"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
           }
         }
       }

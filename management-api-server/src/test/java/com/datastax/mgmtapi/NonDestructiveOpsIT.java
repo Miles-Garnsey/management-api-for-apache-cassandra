@@ -15,7 +15,12 @@ import java.util.List;
 import java.util.Map;
 import javax.ws.rs.core.MediaType;
 
+import com.datastax.mgmtapi.resources.models.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.commons.lang3.tuple.Pair;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -24,15 +29,12 @@ import org.slf4j.LoggerFactory;
 
 import com.datastax.mgmtapi.helpers.IntegrationTestUtils;
 import com.datastax.mgmtapi.helpers.NettyHttpClient;
-import com.datastax.mgmtapi.resources.models.CompactRequest;
-import com.datastax.mgmtapi.resources.models.CreateOrAlterKeyspaceRequest;
-import com.datastax.mgmtapi.resources.models.KeyspaceRequest;
-import com.datastax.mgmtapi.resources.models.RepairRequest;
-import com.datastax.mgmtapi.resources.models.ReplicationSetting;
-import com.datastax.mgmtapi.resources.models.ScrubRequest;
-import com.datastax.mgmtapi.resources.models.TakeSnapshotRequest;
+import com.datastax.mgmtapi.resources.models.CreateTableRequest.Column;
+import com.datastax.mgmtapi.resources.models.CreateTableRequest.ColumnKind;
+import com.datastax.oss.driver.api.core.metadata.schema.ClusteringOrder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import io.netty.handler.codec.http.FullHttpResponse;
 import org.apache.http.HttpStatus;
@@ -40,11 +42,9 @@ import org.apache.http.client.utils.URIBuilder;
 import org.jboss.resteasy.core.messagebody.ReaderUtility;
 import org.jboss.resteasy.core.messagebody.WriterUtility;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static io.netty.util.CharsetUtil.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.Assert.*;
 import static org.junit.Assume.assumeTrue;
 
 /**
@@ -303,8 +303,7 @@ public class NonDestructiveOpsIT extends BaseDockerIntegrationTest
     }
 
     @Test
-    public void testCleanup() throws IOException, URISyntaxException
-    {
+    public void testCleanup() throws IOException, URISyntaxException, InterruptedException {
         assumeTrue(IntegrationTestUtils.shouldRun());
         ensureStarted();
 
@@ -314,9 +313,43 @@ public class NonDestructiveOpsIT extends BaseDockerIntegrationTest
         String keyspaceRequestAsJSON = WriterUtility.asString(keyspaceRequest, MediaType.APPLICATION_JSON);
         URI uri = new URIBuilder(BASE_PATH + "/ops/keyspace/cleanup")
                 .build();
-        boolean requestSuccessful = client.post(uri.toURL(), keyspaceRequestAsJSON)
-                .thenApply(r -> r.status().code() == HttpStatus.SC_OK).join();
-        assertTrue(requestSuccessful);
+
+        // Get job_id here..
+        Pair<Integer, String> postResponse = client.post(uri.toURL(), keyspaceRequestAsJSON)
+                .thenApply(this::responseAsCodeAndBody)
+                .join();
+        assertEquals(HttpStatus.SC_OK, postResponse.getLeft().longValue());
+
+        String jobId = postResponse.getRight();
+        assertNotNull(jobId); // If return code != OK, this is null
+
+        // Add here the check for the job and that is actually is set to complete..
+        Job currentStatus = null;
+        for(int i = 0; i < 10; i++) {
+            URI uriJobStatus = new URIBuilder(BASE_PATH + "/ops/executor/job?job_id=" + jobId)
+                    .build();
+             currentStatus = client.get(uriJobStatus.toURL())
+                    .thenApply(re -> {
+                        String jobJson = responseAsString(re);
+                        try {
+                            return new ObjectMapper().readValue(jobJson, Job.class);
+                        } catch (JsonProcessingException e) {
+                            fail();
+                        }
+                        return null;
+                    }).join();
+            if(currentStatus != null) {
+                if(currentStatus.getStatus() == Job.JobStatus.COMPLETED) {
+                    break;
+                }
+            }
+            Thread.sleep(100);
+        }
+
+        assertNotNull(currentStatus);
+        assertEquals(jobId, currentStatus.getJobId());
+        assertEquals(Job.JobStatus.COMPLETED, currentStatus.getStatus());
+        assertEquals("CLEANUP", currentStatus.getJobType());
     }
 
     @Test
@@ -499,7 +532,7 @@ public class NonDestructiveOpsIT extends BaseDockerIntegrationTest
                 .thenApply(this::responseAsString).join();
         assertNotNull(responseFilter);
         assertNotEquals("", responseFilter);
-        
+
         final ObjectMapper jsonMapper = new ObjectMapper();
         List<String> keyspaces = jsonMapper.readValue(responseFilter, new TypeReference<List<String>>(){});
         assertEquals(1, keyspaces.size());
@@ -584,6 +617,127 @@ public class NonDestructiveOpsIT extends BaseDockerIntegrationTest
         assertTrue("Repair request was not successful", repairSuccessful);
     }
 
+    @Test
+    public void testGetReplication() throws IOException, URISyntaxException
+    {
+        assumeTrue(IntegrationTestUtils.shouldRun());
+        ensureStarted();
+
+        NettyHttpClient client = new NettyHttpClient(BASE_URL);
+        String localDc = client.get(new URIBuilder(BASE_PATH + "/metadata/localdc").build().toURL())
+                .thenApply(this::responseAsString).join();
+
+        String ks = "getreplicationtest";
+        createKeyspace(client, localDc, ks);
+
+        // missing keyspace
+        URI uri = new URIBuilder(BASE_PATH + "/ops/keyspace/replication").build();
+        Pair<Integer, String> response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_BAD_REQUEST);
+        assertThat(response.getRight()).contains("Non-empty 'keyspaceName' must be provided");
+
+        // non existent keyspace
+        uri = new URIBuilder(BASE_PATH + "/ops/keyspace/replication?keyspaceName=nonexistent").build();
+        response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_NOT_FOUND);
+        assertThat(response.getRight()).contains("Keyspace 'nonexistent' does not exist");
+
+        // existing keyspace
+        uri = new URIBuilder(BASE_PATH + "/ops/keyspace/replication?keyspaceName=" + ks).build();
+        response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_OK);
+
+        Map<String, String> actual = new JsonMapper().readValue(response.getRight(), new TypeReference<Map<String,String>>(){});
+        assertThat(actual).hasSize(2)
+                .containsEntry("class", "org.apache.cassandra.locator.NetworkTopologyStrategy")
+                .containsKey(localDc);
+    }
+
+    @Test
+    public void testGetTables() throws IOException, URISyntaxException
+    {
+        assumeTrue(IntegrationTestUtils.shouldRun());
+        ensureStarted();
+
+        NettyHttpClient client = new NettyHttpClient(BASE_URL);
+
+        // missing keyspace
+        URI uri = new URIBuilder(BASE_PATH + "/ops/tables").build();
+        Pair<Integer, String> response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_BAD_REQUEST);
+        assertThat(response.getRight()).contains("Non-empty 'keyspaceName' must be provided");
+
+        // non existent keyspace
+        uri = new URIBuilder(BASE_PATH + "/ops/tables?keyspaceName=nonexistent").build();
+        response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_OK);
+        assertThat(response.getRight()).isEqualTo("[]");
+
+        // existing keyspace
+        uri = new URIBuilder(BASE_PATH + "/ops/tables?keyspaceName=system_schema").build();
+        response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_OK);
+
+        List<String> actual = new JsonMapper().readValue(response.getRight(), new TypeReference<List<String>>(){});
+        assertThat(actual).contains(
+            "aggregates",
+            "columns",
+            "functions",
+            "indexes",
+            "keyspaces",
+            "tables",
+            "triggers",
+            "types",
+            "views"
+        );
+    }
+
+    @Test
+    public void testCreateTable() throws IOException, URISyntaxException
+    {
+        assumeTrue(IntegrationTestUtils.shouldRun());
+        ensureStarted();
+
+        NettyHttpClient client = new NettyHttpClient(BASE_URL);
+        String localDc = client.get(new URIBuilder(BASE_PATH + "/metadata/localdc").build().toURL())
+                .thenApply(this::responseAsString).join();
+
+        // this test also tests case sensitivity in CQL identifiers.
+        String ks = "CreateTableTest";
+        createKeyspace(client, localDc, ks);
+
+        CreateTableRequest request = new CreateTableRequest(
+            ks,
+            "Table1",
+            ImmutableList.of(
+                // having two columns with the same name in different cases can only work if the internal name is being used.
+                new Column("pk", "int", ColumnKind.PARTITION_KEY, 0, null),
+                new Column("PK", "int", ColumnKind.PARTITION_KEY, 1, null),
+                new Column("cc", "timeuuid", ColumnKind.CLUSTERING_COLUMN, 0, ClusteringOrder.ASC),
+                new Column("CC", "timeuuid", ColumnKind.CLUSTERING_COLUMN, 1, ClusteringOrder.DESC),
+                new Column("v", "list<text>", ColumnKind.REGULAR, 0, null),
+                new Column("s", "boolean", ColumnKind.STATIC, 0, null)
+            ),
+            ImmutableMap.of(
+                "bloom_filter_fp_chance", "0.01",
+                "caching", ImmutableMap.of( "keys", "ALL", "rows_per_partition" , "NONE" )
+            ));
+
+        JsonMapper jsonMapper = new JsonMapper();
+
+        URI uri = new URIBuilder(BASE_PATH + "/ops/tables/create").build();
+        Pair<Integer, String> response = client.post(uri.toURL(), jsonMapper.writeValueAsString(request))
+                                               .thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_OK);
+
+        uri = new URIBuilder(BASE_PATH + "/ops/tables?keyspaceName=" + ks).build();
+        response = client.get(uri.toURL()).thenApply(this::responseAsCodeAndBody).join();
+        assertThat(response.getLeft()).isEqualTo(HttpStatus.SC_OK);
+
+        List<String> actual = jsonMapper.readValue(response.getRight(), new TypeReference<List<String>>(){});
+        assertThat(actual).containsExactly("Table1");
+    }
+
     private void createKeyspace(NettyHttpClient client, String localDc, String keyspaceName) throws IOException, URISyntaxException
     {
         CreateOrAlterKeyspaceRequest request = new CreateOrAlterKeyspaceRequest(keyspaceName, Arrays.asList(new ReplicationSetting(localDc, 1)));
@@ -607,5 +761,10 @@ public class NonDestructiveOpsIT extends BaseDockerIntegrationTest
         }
 
         return null;
+    }
+
+    private Pair<Integer, String> responseAsCodeAndBody(FullHttpResponse r)
+    {
+        return Pair.of(r.status().code(), r.content().toString(UTF_8));
     }
 }

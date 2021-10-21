@@ -15,41 +15,65 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.stream.Collectors;
 
 import javax.management.openmbean.CompositeDataSupport;
 import javax.management.openmbean.TabularData;
 
+import com.datastax.mgmtapi.util.Job;
+import com.datastax.mgmtapi.util.JobExecutor;
+import com.datastax.oss.driver.shaded.guava.common.util.concurrent.ListenableFutureTask;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import org.apache.cassandra.db.compaction.OperationType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.datastax.mgmtapi.rpc.Rpc;
 import com.datastax.mgmtapi.rpc.RpcParam;
 import com.datastax.mgmtapi.rpc.RpcRegistry;
+import com.datastax.oss.driver.api.core.CqlIdentifier;
+import com.datastax.oss.driver.api.core.metadata.schema.ClusteringOrder;
+import com.datastax.oss.driver.api.core.type.DataType;
+import com.datastax.oss.driver.api.querybuilder.QueryBuilder;
 import com.datastax.oss.driver.api.querybuilder.SchemaBuilder;
+import com.datastax.oss.driver.api.querybuilder.relation.Relation;
+import com.datastax.oss.driver.api.querybuilder.schema.CreateTable;
+import com.datastax.oss.driver.api.querybuilder.schema.CreateTableWithOptions;
+import com.datastax.oss.driver.api.querybuilder.schema.OngoingPartitionKey;
+import com.datastax.oss.driver.internal.core.metadata.schema.parsing.DataTypeCqlNameParser;
 import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.auth.RoleOptions;
 import org.apache.cassandra.auth.RoleResource;
+import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.messages.RepairOption;
 
 /**
- * Replace JMX calls with CQL 'CALL' methods via the the Rpc framework
+ * Replace JMX calls with CQL 'CALL' methods via the Rpc framework
  */
 public class NodeOpsProvider
 {
     private static final Logger logger = LoggerFactory.getLogger(NodeOpsProvider.class);
     public static final Supplier<NodeOpsProvider> instance = Suppliers.memoize(() -> new NodeOpsProvider());
+    public static final JobExecutor service = new JobExecutor();
 
     public static final String RPC_CLASS_NAME = "NodeOps";
+
+    private static final DataTypeCqlNameParser DATA_TYPE_PARSER = new DataTypeCqlNameParser();
 
     private NodeOpsProvider()
     {
@@ -64,6 +88,50 @@ public class NodeOpsProvider
     public synchronized void unregister()
     {
         RpcRegistry.unregister(RPC_CLASS_NAME);
+    }
+
+    @Rpc(name = "jobStatus")
+    public Map<String, String> getJobStatus(@RpcParam(name="job_id") String jobId) {
+        Map<String, String> resultMap = new HashMap<>();
+        Job jobWithId = service.getJobWithId(jobId);
+        resultMap.put("id", jobWithId.getJobId());
+        resultMap.put("type", jobWithId.getJobType());
+        resultMap.put("status", jobWithId.getStatus().name());
+        resultMap.put("submit_time", String.valueOf(jobWithId.getSubmitTime()));
+        resultMap.put("end_time", String.valueOf(jobWithId.getFinishedTime()));
+        if(jobWithId.getStatus() == Job.JobStatus.ERROR) {
+            resultMap.put("error", jobWithId.getError().getLocalizedMessage());
+        }
+
+        return resultMap;
+    }
+
+    @Rpc(name = "setFullQuerylog")
+    public void setFullQuerylog(@RpcParam(name="enabled") boolean fullQueryLoggingEnabled) throws UnsupportedOperationException
+    {
+        logger.debug("Attempting to set full query logging to " + fullQueryLoggingEnabled);
+        // Warning: bad design here. Default implementation will throw UnsupportedOperationException at runtime. Comparing strings to get versions is also ugly.
+        String cassVersion = ShimLoader.instance.get().getStorageService().getReleaseVersion();
+        if (Integer.parseInt(cassVersion.split("\\.")[0]) < 4){
+            logger.error("Full query logging is not available in Cassandra < 4x. This call is going to fail.");
+        }
+        if (fullQueryLoggingEnabled) {
+            ShimLoader.instance.get().enableFullQuerylog();
+        } else {
+            ShimLoader.instance.get().disableFullQuerylog();
+        }
+    }
+
+    @Rpc(name = "isFullQueryLogEnabled")
+    public boolean isFullQueryLogEnabled() throws UnsupportedOperationException
+    {
+        String cassVersion = ShimLoader.instance.get().getStorageService().getReleaseVersion();
+        logger.debug("Attempting to retrieve full query logging status for cassandra version" + cassVersion + ".");
+        if (Integer.parseInt(cassVersion.split("\\.")[0]) < 4){
+            logger.error("Full query logging is not available in Cassandra < 4x. This call is going to fail.");
+        }
+        logger.debug("Calling ShimLoader.instance.get().isFullQueryLogEnabled()");
+        return ShimLoader.instance.get().isFullQueryLogEnabled();
     }
 
     @Rpc(name = "reloadSeeds")
@@ -170,21 +238,30 @@ public class NodeOpsProvider
     }
 
     @Rpc(name = "forceKeyspaceCleanup")
-    public void forceKeyspaceCleanup(@RpcParam(name="jobs") int jobs,
+    public String forceKeyspaceCleanup(@RpcParam(name="jobs") int jobs,
             @RpcParam(name="keyspaceName") String keyspaceName,
             @RpcParam(name="tables") List<String> tables) throws InterruptedException, ExecutionException, IOException
     {
         logger.debug("Reloading local schema");
-        List<String> keyspaces = Collections.singletonList(keyspaceName);
-        if (keyspaceName != null && keyspaceName.toUpperCase().equals("NON_LOCAL_STRATEGY"))
+        final List<String> keyspaces = new ArrayList<>();
+
+        if (keyspaceName != null && keyspaceName.equalsIgnoreCase("NON_LOCAL_STRATEGY"))
         {
-            keyspaces = ShimLoader.instance.get().getStorageService().getNonLocalStrategyKeyspaces();
+            keyspaces.addAll(ShimLoader.instance.get().getStorageService().getNonLocalStrategyKeyspaces());
+        } else {
+            keyspaces.add(keyspaceName);
         }
 
-        for (String keyspace : keyspaces)
-        {
-            ShimLoader.instance.get().getStorageService().forceKeyspaceCleanup(jobs, keyspace, tables.toArray(new String[]{}));
-        }
+        // Send to background execution
+        return service.submit(OperationType.CLEANUP.name(), () -> {
+            for (String keyspace : keyspaces) {
+                try {
+                    ShimLoader.instance.get().getStorageService().forceKeyspaceCleanup(jobs, keyspace, tables.toArray(new String[]{}));
+                } catch (IOException | ExecutionException | InterruptedException e) {
+                    logger.error("Failed to execute forceKeyspaceCleanup in " + keyspace, e);
+                }
+            }
+        });
     }
 
     @Rpc(name = "forceKeyspaceCompactionForTokenRange")
@@ -336,16 +413,105 @@ public class NodeOpsProvider
         return ShimLoader.instance.get().getKeyspaces();
     }
 
+    @Rpc(name = "getReplication")
+    public Map<String, String> getReplication(@RpcParam(name = "keyspaceName") String keyspaceName)
+    {
+        String query = QueryBuilder.selectFrom("system_schema", "keyspaces")
+                                   .column("replication")
+                                   .where(Relation.column("keyspace_name").isEqualTo(QueryBuilder.literal(keyspaceName))).asCql();
+        UntypedResultSet rows = ShimLoader.instance.get().processQuery(query, ConsistencyLevel.ONE);
+        if (rows.isEmpty())
+        {
+            return null;
+        }
+        return rows.one().getMap("replication", UTF8Type.instance, UTF8Type.instance);
+    }
+
+    @Rpc(name = "getTables")
+    public List<String> getTables(@RpcParam(name = "keyspaceName") String keyspaceName)
+    {
+        String query = QueryBuilder.selectFrom("system_schema", "tables")
+                                   .column("table_name")
+                                   .where(Relation.column("keyspace_name").isEqualTo(QueryBuilder.literal(keyspaceName))).asCql();
+        UntypedResultSet rows = ShimLoader.instance.get().processQuery(query, ConsistencyLevel.ONE);
+        List<String> tables = new ArrayList<>();
+        for (UntypedResultSet.Row row : rows)
+        {
+            tables.add(row.getString("table_name"));
+        }
+        return tables;
+    }
+
     @Rpc(name = "createKeyspace")
     public void createKeyspace(@RpcParam(name="keyspaceName") String keyspaceName, @RpcParam(name="replicationSettings") Map<String, Integer> replicationSettings) throws IOException
     {
         logger.debug("Creating keyspace {} with replication settings {}", keyspaceName, replicationSettings);
 
-        ShimLoader.instance.get().processQuery(SchemaBuilder.createKeyspace(keyspaceName)
+        ShimLoader.instance.get().processQuery(SchemaBuilder.createKeyspace(CqlIdentifier.fromInternal(keyspaceName))
                         .ifNotExists()
                         .withNetworkTopologyStrategy(replicationSettings)
                         .asCql(),
                 ConsistencyLevel.ONE);
+    }
+
+    @Rpc(name = "createTable")
+    public void createTable(@RpcParam(name = "keyspaceName") String keyspaceName,
+                            @RpcParam(name = "tableName") String tableName,
+                            @RpcParam(name = "columnsAndTypes") Map<String, String> columnsAndTypes,
+                            @RpcParam(name = "partitionKeyColumnNames") List<String> partitionKeyColumnNames,
+                            @RpcParam(name = "clusteringColumnNames") List<String> clusteringColumnNames,
+                            @RpcParam(name = "clusteringOrders") List<String> clusteringOrders,
+                            @RpcParam(name = "staticColumnNames") List<String> staticColumnNames,
+                            @RpcParam(name = "simpleOptions") Map<String, String> simpleOptions,
+                            @RpcParam(name = "complexOptions") Map<String, Map<String, String>> complexOptions)
+    {
+        logger.debug("Creating table {}", tableName);
+        CqlIdentifier keyspaceId = CqlIdentifier.fromInternal(keyspaceName);
+        CqlIdentifier tableId = CqlIdentifier.fromInternal(tableName);
+        OngoingPartitionKey stmtStart = SchemaBuilder.createTable(keyspaceId, tableId).ifNotExists();
+        for (String name : partitionKeyColumnNames)
+        {
+            DataType dt = DATA_TYPE_PARSER.parse(keyspaceId, columnsAndTypes.get(name), null, null);
+            stmtStart = stmtStart.withPartitionKey(CqlIdentifier.fromInternal(name), dt);
+        }
+        CreateTable stmt = (CreateTable) stmtStart;
+        for (String name : clusteringColumnNames)
+        {
+            DataType dt = DATA_TYPE_PARSER.parse(keyspaceId, columnsAndTypes.get(name), null, null);
+            stmt = stmt.withClusteringColumn(CqlIdentifier.fromInternal(name), dt);
+        }
+        for (String name : staticColumnNames)
+        {
+            DataType dt = DATA_TYPE_PARSER.parse(keyspaceId, columnsAndTypes.get(name), null, null);
+            stmt = stmt.withStaticColumn(CqlIdentifier.fromInternal(name), dt);
+        }
+        for (String name : columnsAndTypes.keySet())
+        {
+            if (!partitionKeyColumnNames.contains(name) && !clusteringColumnNames.contains(name) && !staticColumnNames.contains(name))
+            {
+                DataType dt = DATA_TYPE_PARSER.parse(keyspaceId, columnsAndTypes.get(name), null, null);
+                stmt = stmt.withColumn(CqlIdentifier.fromInternal(name), dt);
+            }
+        }
+        CreateTableWithOptions stmtFinal = stmt;
+        for (int i = 0; i < clusteringColumnNames.size(); i++)
+        {
+            String name = clusteringColumnNames.get(i);
+            ClusteringOrder order = ClusteringOrder.valueOf(clusteringOrders.get(i).toUpperCase(Locale.ROOT));
+            stmtFinal = stmtFinal.withClusteringOrder(CqlIdentifier.fromInternal(name), order);
+        }
+        for (Map.Entry<String, String> entry : simpleOptions.entrySet())
+        {
+            stmtFinal = stmtFinal.withOption(entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, Map<String, String>> entry : complexOptions.entrySet())
+        {
+            stmtFinal = stmtFinal.withOption(entry.getKey(), entry.getValue());
+        }
+        String query = stmtFinal.asCql();
+        logger.debug("Generated query: {}", query);
+        ShimLoader.instance.get().processQuery(query, ConsistencyLevel.ONE);
+        logger.debug("Table successfully created: {}", tableId);
     }
 
     @Rpc(name = "getLocalDataCenter")
@@ -359,7 +525,7 @@ public class NodeOpsProvider
     {
         logger.debug("Creating keyspace {} with replication settings {}", keyspaceName, replicationSettings);
 
-        ShimLoader.instance.get().processQuery(SchemaBuilder.alterKeyspace(keyspaceName)
+        ShimLoader.instance.get().processQuery(SchemaBuilder.alterKeyspace(CqlIdentifier.fromInternal(keyspaceName))
                         .withNetworkTopologyStrategy(replicationSettings)
                         .asCql(),
                 ConsistencyLevel.ONE);

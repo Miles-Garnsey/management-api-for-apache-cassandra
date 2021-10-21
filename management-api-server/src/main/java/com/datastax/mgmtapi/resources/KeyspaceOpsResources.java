@@ -7,6 +7,7 @@ package com.datastax.mgmtapi.resources;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import javax.ws.rs.Consumes;
@@ -18,8 +19,10 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
+import com.datastax.mgmtapi.resources.helpers.ResponseTools;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.http.ConnectionClosedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,6 +36,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.swagger.v3.oas.annotations.Operation;
 import org.apache.http.HttpStatus;
+
+import static com.datastax.mgmtapi.resources.NodeOpsResources.handle;
 
 @Path("/api/v0/ops/keyspace")
 public class KeyspaceOpsResources
@@ -52,7 +57,7 @@ public class KeyspaceOpsResources
     @Path("/cleanup")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.TEXT_PLAIN)
-    @Operation(summary = "Triggers the immediate cleanup of keys no longer belonging to a node. By default, clean all keyspaces")
+    @Operation(summary = "Triggers the immediate cleanup of keys no longer belonging to a node. By default, clean all keyspaces. This operation is asynchronous and returns immediately")
     public Response cleanup(KeyspaceRequest keyspaceRequest)
     {
         return NodeOpsResources.handle(() ->
@@ -73,10 +78,8 @@ public class KeyspaceOpsResources
                 return Response.ok("OK").build();
             }
 
-            cqlService.executePreparedStatement(app.dbUnixSocketFile,
-                    "CALL NodeOps.forceKeyspaceCleanup(?, ?, ?)", keyspaceRequest.jobs, keyspaceName, tables);
-
-            return Response.ok("OK").build();
+            return Response.ok(ResponseTools.getSingleRowStringResponse(app.dbUnixSocketFile, cqlService, "CALL NodeOps.forceKeyspaceCleanup(?, ?, ?)",
+                    keyspaceRequest.jobs, keyspaceName, tables)).build();
         });
     }
 
@@ -176,6 +179,32 @@ public class KeyspaceOpsResources
             }
 
             return Response.ok(jsonMapper.writeValueAsString(keyspaces), MediaType.APPLICATION_JSON).build();
+        });
+    }
+
+    @GET
+    @Path("/replication")
+    @Produces(MediaType.APPLICATION_JSON)
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Operation(summary = "Get the replication settings of an existing keyspace")
+    public Response getReplication(@QueryParam(value="keyspaceName")String keyspaceName) {
+        if (StringUtils.isBlank(keyspaceName)) {
+            return Response.status(HttpStatus.SC_BAD_REQUEST)
+                    .entity("Get keyspace replication failed. Non-empty 'keyspaceName' must be provided").build();
+        }
+        return NodeOpsResources.handle(() ->
+        {
+            ResultSet result = cqlService.executePreparedStatement(
+                    app.dbUnixSocketFile, "CALL NodeOps.getReplication(?)", keyspaceName);
+            Row row = result.one();
+            if (row == null) {
+                return Response.status(HttpStatus.SC_NOT_FOUND)
+                        .entity(String.format("Get keyspace replication failed. Keyspace '%s' does not exist.", keyspaceName)).build();
+            } else {
+                Map<String, String> replication = row.getMap(0, String.class, String.class);
+                assert replication != null;
+                return Response.ok(replication, MediaType.APPLICATION_JSON).build();
+            }
         });
     }
 }
