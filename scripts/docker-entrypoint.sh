@@ -88,6 +88,14 @@ if [ "$1" = 'mgmtapi' ]; then
         echo "JVM_OPTS=\"\$JVM_OPTS -javaagent:${MGMT_AGENT_JAR}\"" >> ${CASSANDRA_CONF}/cassandra-env.sh
     fi
 
+    # Add CDC agent
+    CDC_AGENT_JAR="$(find "${CDC_AGENT_PATH}" -name cdc-agent.jar)"
+    if ! grep -qxF "JVM_OPTS=\"\$JVM_OPTS -javaagent:${CDC_AGENT_JAR}\"" < ${CASSANDRA_CONF}/cassandra-env.sh ; then
+        # ensure newline at end of file
+        echo "" >> ${CASSANDRA_CONF}/cassandra-env.sh
+        echo "JVM_OPTS=\"\$JVM_OPTS -javaagent:${CDC_AGENT_JAR}\"" >> ${CASSANDRA_CONF}/cassandra-env.sh
+    fi
+
     # Set this if you want to ignore default env variables, i.e. when running inside an operator
     if [ $IGNORE_DEFAULTS ] || [ $USE_MGMT_API ]; then
         CASSANDRA_RPC_ADDRESS='0.0.0.0'
