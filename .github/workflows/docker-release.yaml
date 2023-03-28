@@ -34,7 +34,7 @@ jobs:
         id: get_version
         run: echo "RELEASE_VERSION=$(echo ${GITHUB_REF##*/})" >> $GITHUB_ENV
       - name: Publish DSE 6.8 to Registry
-        uses: elgohr/Publish-Docker-Github-Action@master
+        uses: elgohr/Publish-Docker-Github-Action@v5
         with:
           name: datastax/dse-mgmtapi-6_8
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
